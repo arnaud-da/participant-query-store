@@ -321,10 +321,15 @@ object `package` extends RootModule { root =>
 
     override def ivyDeps = Agg(
       L.zio.zio,
+      L.netty.codecHttp,
+      L.netty.handlerProxy,
+      L.netty.pkiTesting,
+      L.netty.transportNativeEpoll,
+      L.netty.transportNativeKqueue,
       L.zio.http,
       L.zio.streams,
       // Bump transitive dep to resolve vulnerabilities
-      L.protoJava
+      L.protoJava,
     )
 
     object test extends ScribeTests
