@@ -6,6 +6,12 @@ PQS PQS_VERSION has been released on RELEASE_DATE
 
 _Write summary of release_
 
+## SQL Migration
+
+This release includes the following SQL migrations:
+- _FileName.sql_: _DESCRIPTION_ **[Impact: Instantaneous /< 1 min / ~10 mins]**
+
+
 ## What's New
 
 ### Minor Improvements
