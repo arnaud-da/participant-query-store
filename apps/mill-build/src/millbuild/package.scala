@@ -14,11 +14,11 @@ package object millbuild {
 
     // Latest snapshot: https://console.cloud.google.com/artifacts/docker/da-images/europe/public-unstable/components%2Fdamlc
     // Latest stable: https://console.cloud.google.com/artifacts/docker/da-images/europe/public/components%2Fdamlc
-    val damlc = "3.6.0-snapshot.20260709.14749.0.v2489973e"
+    val damlc = "3.6.0-snapshot.20260818.14788.0.v64638935"
 
     // Latest snapshot: https://console.cloud.google.com/artifacts/docker/da-images/europe/public-unstable/components%2Fcanton-open-source
     // Latest stable: https://console.cloud.google.com/artifacts/docker/da-images/europe/public/components%2Fcanton-open-source
-    val canton = "3.6.0-snapshot.20260710.19599.0.v11fb3ac0"
+    val canton = "3.6.0-snapshot.20260818.20026.0.v41046c3b"
 
     val dockerClient = "3.4.0"
     val flyway = "12.10.0"
@@ -48,7 +48,7 @@ package object millbuild {
       val compiler = ivy"com.thesamet.scalapb::compilerplugin:${V.scalaPB}"
     }
 
-    val protoJava = ivy"com.google.protobuf:protobuf-java:3.25.9"
+    val protoJava = ivy"com.google.protobuf:protobuf-java:4.35.1"
 
     object netty {
       val codecHttp = ivy"io.netty:netty-codec-http:${V.nettyVersion}"
@@ -153,7 +153,7 @@ package object millbuild {
 
     object commons {
       val text  = ivy"org.apache.commons:commons-text:1.12.0"
-      val lang3 = ivy"org.apache.commons:commons-lang3:3.17.0"
+      val lang3 = ivy"org.apache.commons:commons-lang3:3.18.0"
     }
 
     object openTelemetry {
