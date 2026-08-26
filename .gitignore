@@ -1,6 +1,10 @@
 ## Block MacOS Generated Files:
 **/.DS_Store
 
+## JVM/Mill
+/out/
+*.log
+
 ## Block IDE Generated Files:
 /.idea/
 /.vscode/
@@ -11,15 +15,10 @@
 ## Block Scaffold Specific Files:
 .direnv*
 .envrc.private
-
-
-## Ignores provided by template:
-.dist*
-.fetched*
-__pycache__*
-**/out
+/.dist/
 
 ## Target for Blackduck scanning
 .blackduck-input
 
+## Scripts output
 scripts/benchmarking/out/

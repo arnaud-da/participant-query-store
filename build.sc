@@ -24,6 +24,10 @@ import wart.WartRemoverModule
 import scala.annotation.nowarn
 
 object `package` extends RootModule { root =>
+  // All Mill modules are under modules/
+  implicit def millModuleBasePath: define.Ctx.BasePath =
+    define.Ctx.BasePath(super.millModuleBasePath.value / "modules")
+
   object all extends GlobalTasks
 
   val dockerImage = s"eclipse-temurin:${V.jdk}"

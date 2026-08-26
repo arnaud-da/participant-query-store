@@ -24,13 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/nix
-      - run: make apps/prefetch-deps
+      - run: make prefetch-deps
       - name: Build & Package
-        run: make apps/build apps/package
+        run: make build package
       - name: Store Mill outputs
         uses: actions/upload-artifact@v7
         with:
-          path: apps/out
+          path: out
           retention-days: 7
 
   matrix-test:
