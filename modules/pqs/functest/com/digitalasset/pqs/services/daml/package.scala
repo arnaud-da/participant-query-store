@@ -3,10 +3,8 @@
 
 package com.digitalasset.pqs.services
 
-import com.digitalasset.pqs.utils.safeequals.=/=
 import com.digitalasset.transcode.schema.*
 import org.semver4j.Semver
-import zio.{FiberRef, Task, Unsafe}
 
 package object daml:
   case class DamlSource(
@@ -42,33 +40,7 @@ package object daml:
 
   case class DeployedDar(dar: DarFile)
 
-  /** Allocated Daml Party. Party ID is populated after the party is allocated. */
-  case class Party(prefix: String):
-    private[daml] val _name: FiberRef[Option[String]] = Unsafe.unsafe { unsafe ?=>
-      FiberRef.unsafe.make(Option.empty[String])
-    }
-    def name: Task[String] = _name.get.someOrFail(notInitialized)
-    private[daml] val _id: FiberRef[Option[String]] = Unsafe.unsafe { unsafe ?=>
-      FiberRef.unsafe.make(Option.empty[String])
-    }
-    def id: Task[String]       = _id.get.someOrFail(notInitialized)
-    private val notInitialized = new RuntimeException(s"Party $prefix is not allocated")
-  end Party
-
-  /** Service representing allocated parties */
-  final case class Parties(get: Seq[Party])
   type ParticipantId = String
-
-  final case class User(
-      primaryParty: Party,
-      canActAs: Seq[Party] = Seq.empty,
-      canReadAs: Seq[Party] = Seq.empty,
-      canReadAsAnyParty: Boolean = false
-  ) {
-    val id = primaryParty.id.map(_.takeWhile(_ =/= ':'))
-  }
-
-  final case class Users(get: Seq[User])
 
   trait Ledger
 
