@@ -6,13 +6,12 @@ package com.digitalasset.pqs.services.daml
 import com.digitalasset.transcode.schema.{PackageId, PackageName, PackageVersion}
 import com.digitalasset.pqs.docker.{Docker, Service}
 import com.digitalasset.pqs.functest.{Dpm, FTConfig, FTEnv}
-import com.digitalasset.pqs.grpc.{ZClientInterceptor, ZManagedChannel}
 import com.digitalasset.pqs.services.daml
 import com.digitalasset.pqs.services.daml.specific.toOffset
 import com.digitalasset.pqs.services.oauth.OAuth
-import io.grpc.Metadata
-import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
+import com.digitalasset.pqs.utils.safeequals.*
 import org.semver4j.Semver
+import os.Path
 import zio.ZIO.{attemptBlocking, logInfo, suspend}
 import zio.test.{Spec, TestAspectAtLeastR}
 import zio.*
@@ -23,8 +22,6 @@ import java.util.zip.ZipInputStream
 import scala.util.Using
 
 object DamlSdk:
-  private val maxRequestSize: Int = 30 * 1024 * 1024
-
   ////////////
   // Layers //
   ////////////
@@ -120,69 +117,111 @@ object DamlSdk:
       def some[R >: Nothing <: FTEnv, E >: Nothing <: Any](spec: Spec[R, E])(implicit trace: Trace): Spec[R, E] =
         spec.whenZIO(ZIO.service[FTEnv].map(env => f(env.config)).map(matcher))
 
-  val ledger: RLayer[FTEnv & Docker, Service[Ledger]] =
-    CantonConf.layer >+> canton("canton")
+  val ledger: RLayer[FTEnv & Docker, Service[Ledger]] = ZLayer.scoped(
+    for
+      conf     <- CantonConf()
+      hostname <- cantonHostname
+      files    <- conf.oneParticipant(hostname)
+      svc      <- canton(hostname, conf.cantonDockerImage, files)
+    yield svc
+  )
+
+  def multiSyncLedger(sync1: Synchronizer, sync2: Synchronizer): RLayer[FTEnv & Docker, Service[Ledger]] =
+    ZLayer.scoped(
+      for
+        conf     <- CantonConf()
+        hostname <- cantonHostname
+        files    <- conf.twoSynchronizers(hostname, sync1, sync2)
+        svc      <- canton(hostname, conf.cantonDockerImage, files)
+      yield svc
+    ) >+>
+      ZLayer.fromZIO(
+        // Register the synchronizer IDs right after the ledger started
+        for
+          allSynchronizers <- Ledger.getAllSynchronizers
+          _ <- ZIO.foreach(Seq(sync1, sync2)) { sync =>
+            allSynchronizers.find(s => s.synchronizerAlias === sync.name) match
+              case Some(connectedSync) => ZIO.attempt(sync.set(connectedSync.synchronizerId))
+              case None                => ZIO.fail(RuntimeException(s"Synchronizer ${sync.name} is not connected"))
+          }
+        yield ()
+      )
+
+  private val cantonHostname =
+    Docker.share(s"canton_cnt")(Ref.Synchronized.make(0)).flatMap(_.updateAndGet(_ + 1)).map(cnt => s"canton-$cnt")
 
   private def canton(
-      prefix: String,
-      suppressOutput: Boolean = true
-  ): RLayer[FTEnv & CantonConf & Docker, Service[Ledger]] =
-    ZLayer
-      .fromZIO(
-        for
-          version         <- FTEnv.cantonVersion
-          protocolVersion <- FTEnv.cantonProtocolVersion
-          cnt             <- Docker.share(s"${prefix}_cnt")(Ref.Synchronized.make(0)).flatMap(_.updateAndGet(_ + 1))
-          hostname = s"$prefix-$cnt"
-          cantonConf <- ZIO.service[CantonConf]
-          files      <- cantonConf(hostname, Ledger.participantPort, "mydomain", 5081, protocolVersion, maxRequestSize)
-          ftEnv      <- ZIO.service[FTEnv]
-          svc = Docker
-            .service[Ledger](
-              image = cantonConf.cantonDockerImage,
-              exposePorts = Set(Ledger.participantPort),
-              prepopulateFiles = files,
-              hostname = Some(hostname),
-              env = cantonConf.cantonEnvVarMap,
-              user = Some(cantonConf.user),
-              suppressOutput = !ftEnv.showCantonLogs
-            )(cantonConf.cantonAdditionalCmds*)
-            .tap(_.get.blockUntilStdOut(_.contains(cantonConf.bootstrapCompleteMessage)))
-        yield svc
-      )
-      .flatten
+      hostname: String,
+      dockerImage: String,
+      cantonFiles: Seq[(Path, String | Array[Byte])]
+  ): ZIO[FTEnv & (Docker & Scope), Throwable, Service[Ledger]] =
+    for
+      showCantonLogs <- FTEnv.showCantonLogs
+      env <- Docker
+        .service[Ledger](
+          image = dockerImage,
+          exposePorts = Set(CantonConf.participantPort),
+          prepopulateFiles = cantonFiles,
+          hostname = Some(hostname),
+          env = CantonConf.cantonEnvVarMap,
+          user = Some(CantonConf.user),
+          suppressOutput = !showCantonLogs
+        )(CantonConf.cantonAdditionalCmds*)
+        .build
+      svc = env.get[Service[Ledger]]
+      _ <- svc.blockUntilStdOut(_.contains(CantonConf.bootstrapCompleteMessage))
+    yield svc
 
-  val deploy: RLayer[Docker & Service[Ledger] & DarFile, DeployedDar] =
-    ZLayer
-      .fromZIO(
-        for
-          dar   <- ZIO.service[DarFile]
-          mutex <- Docker.share("upload_dar" -> dar.packageId)(Semaphore.make(1))
-          alreadyExists = api.listPackageIds.map(_.toSet.contains(dar.packageId))
-          upload        = suspend(api.uploadDar(dar))
-          _ <- mutex.withPermit(upload.unlessZIO(alreadyExists))
-        yield DeployedDar(dar)
-      )
+  val deploy: RLayer[Docker & Service[Ledger] & DarFile, DeployedDar] = uploadAndVetDar()
+
+  def uploadAndVetDar(synchronizers: Synchronizer*): RLayer[Docker & Service[Ledger] & DarFile, DeployedDar] =
+    ZLayer.fromZIO(
+      for
+        dar   <- ZIO.service[DarFile]
+        mutex <- Docker.share("upload_dar" -> dar.packageId)(Semaphore.make(1))
+        alreadyExists = Ledger.listPackageIds.map(_.toSet.contains(dar.packageId))
+        // Force vetting if synchronizers is unspecified
+        upload = suspend(Ledger.uploadDar(dar, withVetting = synchronizers.isEmpty))
+        _ <- mutex.withPermit(upload.unlessZIO(alreadyExists))
+        _ <- ZIO.foreach(synchronizers)(sync => Ledger.vetDar(dar, sync))
+      yield DeployedDar(dar)
+    )
+
+  def parties(parties: Party*): RLayer[Docker & Service[Ledger], Parties] =
+    allocateMany(parties.map(_ -> Seq("")))
+
+  def allocateParties(partySynchronizers: (Party, Seq[Synchronizer])*): RLayer[Docker & Service[Ledger], Parties] =
+    allocateMany(partySynchronizers.map((p, ss) => (p, ss.map(_.id))))
 
   /** Allocate parties on ledger and wrap them in a layer */
-  def parties(parties: Party*): RLayer[Docker & Service[Ledger], Parties] =
-    ZLayer.fromZIO(for
-      partyCounter <- Docker.share("party_cnt")(Ref.Synchronized.make(0)).flatMap(_.updateAndGet(_ + 1))
-      hints = parties.map(party => s"${party.prefix}_$partyCounter")
-      ids           <- ZIO.foreach(hints) { hint => api.allocateParty(hint) }
-      oauthInstance <- Docker.inspectMaybe[OAuth.Instance]
-      ps <- ZIO.foreach(parties zip hints zip ids) {
-        case ((p, hint), id) =>
-          ZIO.attempt(p.set(id, hint))
-            *> ZIO.unless(oauthInstance.isEmpty) { api.grantRights(id) }.as(p)
-      }
-    yield Parties(ps))
+  private def allocateMany(partySynchronizers: Seq[(Party, Seq[String])]): RLayer[Docker & Service[Ledger], Parties] =
+    ZLayer.fromZIO(
+      for
+        partyCounter  <- Docker.share("party_cnt")(Ref.Synchronized.make(0)).flatMap(_.updateAndGet(_ + 1))
+        oauthInstance <- Docker.inspectMaybe[OAuth.Instance]
+        parties <- ZIO.foreach(partySynchronizers) { (party, synchronizers) =>
+          val hint = s"${party.prefix}_$partyCounter"
+          for
+            ids <- ZIO.foreach(synchronizers)(syncId => Ledger.allocateParty(syncId, hint))
+            id <- ids.distinct match
+              case Seq(single) => ZIO.succeed(single)
+              case _ =>
+                val error = RuntimeException(
+                  s"Expected identical party ids across synchronizers for $hint, got: ${ids.mkString(", ")}"
+                )
+                ZIO.fail(error)
+            _ <- ZIO.attempt(party.set(id, hint))
+            _ <- ZIO.unless(oauthInstance.isEmpty) { Ledger.grantRights(id) }
+          yield party
+        }
+      yield Parties(parties)
+    )
 
   /** Discover already-allocated parties on the participant by prefix match. */
   def allocatedParties(parties: Party*): RLayer[Docker & Service[Ledger], Parties] =
     ZLayer.fromZIO(
       for
-        knownParties <- api.listKnownParties
+        knownParties <- Ledger.listKnownParties
         ps <- ZIO.foreach(parties) { party =>
           ZIO.attempt {
             val details = knownParties
@@ -198,7 +237,7 @@ object DamlSdk:
     ZLayer.fromZIO(ZIO.foreach(users)(createUser).map(Users.apply))
 
   private def createUser(user: daml.User): ZIO[Docker & Service[Ledger], Throwable, User] =
-    api
+    Ledger
       .createUser(
         user.id,
         user.primaryParty.id,
@@ -212,21 +251,21 @@ object DamlSdk:
 
   /** Prune ledger up to offset */
   def pruneLedger(upToOffset: String | Long): RLayer[Docker & Service[Ledger], PrunedTo] =
-    ZLayer.fromZIO(upToOffset.toOffset.flatMap(api.pruneLedger).as(PrunedTo(upToOffset)))
+    ZLayer.fromZIO(upToOffset.toOffset.flatMap(Ledger.pruneLedger).as(PrunedTo(upToOffset)))
 
   /** Run script and store result in the layer */
   def runScript[IN: upickle.default.Writer](
       name: String,
       args: => IN
   ): ZLayer[Docker & Service[Ledger] & DarFile & FTEnv & Dpm, Throwable, Unit] =
-    ZLayer.scoped(for
+    ZLayer.fromZIO(for
       scriptDir         <- FTEnv.createUniqueDirectory(s"runscript-$name")
       ca                <- Docker.certificateAuthority
       cert              <- ca.generate("runscript")
       rootCaCrt         <- writeFile(scriptDir / "tls" / "root-ca.crt", ca.certificate.crt)
       participantPem    <- writeFile(scriptDir / "tls" / "participant.pem", cert.certificate.pem)
       participantCrt    <- writeFile(scriptDir / "tls" / "participant.crt", cert.certificate.crt)
-      ledger            <- ZIO.service[Service[Ledger]]
+      ledger            <- Ledger.container
       adminTokenService <- inspectMaybe[TokenService]
       dar               <- ZIO.service[DarFile]
       version           <- FTEnv.damlSdkVersion
@@ -242,10 +281,10 @@ object DamlSdk:
       _ <- Dpm.runScript(
         packageDir = dar.mainPackageDir,
         ledgerHost = ledger.exposedAddress,
-        ledgerPort = ledger.exposedPorts(Ledger.participantPort),
+        ledgerPort = ledger.exposedPorts(CantonConf.participantPort),
         scriptName = name,
         darPath = dar.darPath,
-        maxRequestSize = maxRequestSize,
+        maxRequestSize = CantonConf.maxRequestSize,
         inputFile = inputFile,
         outputFile = outputFile,
         crt = participantCrt,
@@ -257,41 +296,4 @@ object DamlSdk:
 
   private def writeFile(file: os.Path, content: String): Task[os.Path] =
     ZIO.attemptBlocking(os.write(file, content, createFolders = true)).as(file)
-
-  ///////////////
-  // Internals //
-  ///////////////
-
-  private lazy val participantChannel: RLayer[Docker & Service[Ledger], ZManagedChannel] =
-    val authHeader = Metadata.Key.of("Authorization", Metadata.ASCII_STRING_MARSHALLER)
-    ZLayer.scoped(for
-      svc               <- Docker.inspect[Ledger]
-      adminTokenService <- inspectMaybe[TokenService]
-      ca                <- Docker.certificateAuthority
-      cert              <- ca.generate("participant")
-      mkBuilder = () =>
-        NettyChannelBuilder
-          .forAddress(svc.exposedAddress, svc.exposedPorts(Ledger.participantPort))
-          .useTransportSecurity()
-          .sslContext(
-            GrpcSslContexts.forClient
-              .keyManager(cert.certificate.privateKey, cert.certificate.certificate)
-              .trustManager(ca.certificate.certificate)
-              .build()
-          )
-      interceptor = ZClientInterceptor.intercept { md =>
-        ZIO
-          .whenCase(adminTokenService) {
-            case Some(ts) => ts.getParticipantAdminToken.flatMap { token => md.put(authHeader, token) }
-          }
-          .orDie
-      }
-      channel <- ZManagedChannel(mkBuilder(), 128, interceptor).build
-    yield channel.get)
-
-  lazy val api = Api(participantChannel)
-
-  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-  def inspectMaybe[T: Tag]: UIO[Option[T]] =
-    ZIO.environment[Any].mapAttempt(_.asInstanceOf[ZEnvironment[T]].get[T]).option
 end DamlSdk

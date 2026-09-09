@@ -5,6 +5,7 @@ package com.digitalasset.pqs.services
 
 import com.digitalasset.transcode.schema.*
 import org.semver4j.Semver
+import zio.*
 
 package object daml:
   case class DamlSource(
@@ -38,13 +39,11 @@ package object daml:
     val packageId: PackageId     = packageInfo.map((name, version, id) => name -> id).toMap.apply(source.name)
     def packageName: PackageName = source.name
 
-  case class DeployedDar(dar: DarFile)
+  case class DeployedDar(dar: DarFile):
+    export dar.*
 
   type ParticipantId = String
 
-  trait Ledger
-
-  object Ledger:
-    val participantPort: Int = 6865
-    val adminApiPort: Int    = 6866
-    val participantAdmin     = "participant_admin"
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  def inspectMaybe[T: Tag]: UIO[Option[T]] =
+    ZIO.environment[Any].mapAttempt(_.asInstanceOf[ZEnvironment[T]].get[T]).option
