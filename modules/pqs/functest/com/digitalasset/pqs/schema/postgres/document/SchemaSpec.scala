@@ -10,6 +10,7 @@ import com.digitalasset.pqs.services.daml.{DamlSdk, DamlSource, Party}
 import com.digitalasset.pqs.services.postgres.Postgres
 import com.digitalasset.pqs.services.pqs.Pqs
 import com.digitalasset.pqs.specific.{eventIdSqlType, offsetSqlType}
+import com.digitalasset.transcode.schema.packageName
 import zio.ZLayer
 import zio.jdbc.sqlInterpolator
 import zio.test.*
@@ -354,6 +355,43 @@ object SchemaSpec extends SharedLedgerAndPostgresTest:
           "__exercises_1" | "__exercises_1_package_pk_idx"             | "btree"
         }
     ,
+    suite("create_index_for_contract")(
+      funcTest("creates index on partition"):
+        val contractName = s"${pingPong.name.packageName}:PingPong:Ping"
+        val indexName    = "test-index-name"
+        val indexType    = "hash"
+        Given:
+          context
+        When:
+          Pqs.runPipeline("--pipeline-ledger-stop=Latest")
+        Then:
+          Postgres call {
+            sql"call create_index_for_contract($indexName, $contractName, '(payload->>''receiver'')', $indexType);"
+          } `returns` ()
+        And:
+          for {
+            tpe_pk <-
+              Postgres
+                .get {
+                  sql"select __contract_tpe4name($contractName);"
+                }
+                .map(_.get)
+            result <- Postgres query {
+              sql"""select
+                          c.relname as table_name,
+                          i.relname as index_name,
+                          am.amname as index_type
+                      from pg_class c
+                               join pg_index ix on c.oid = ix.indrelid
+                               join pg_class i on i.oid = ix.indexrelid
+                               join pg_am am on i.relam = am.oid
+                      where c.relname like '__contracts_%' and i.relname like ${"%" + indexName + "_idx"}
+                      ;"""
+            } `returns` table {
+              s"__contracts_$tpe_pk" | s"__contracts_${tpe_pk}_${indexName}_idx" | indexType
+            }
+          } yield result
+    ),
     suite("migrations")(
       funcTest("manage schema evolution with Flyway"):
         Given:
